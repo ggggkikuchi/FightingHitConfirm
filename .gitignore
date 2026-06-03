@@ -1,0 +1,21 @@
+# Build
+build/
+DerivedData/
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.pbxuser
+
+# CocoaPods / SPM
+Pods/
+.build/
+
+# macOS
+.DS_Store
+
+# Archives & exports (App Store / TestFlight 提出物)
+*.xcarchive
+*.ipa
