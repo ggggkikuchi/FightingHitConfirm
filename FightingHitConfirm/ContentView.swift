@@ -398,30 +398,31 @@ struct PracticeView: View {
 
     @ViewBuilder
     private var actionArea: some View {
-        // 攻撃ボタン（攻撃モードのみ）- フィードバック中もタップで次ラウンド開始
+        // 攻撃ボタン（攻撃モードのみ）
+        // idle/feedback → ラウンド開始、cueActive → ヒット確認（押す）
         if practiceType == .attack {
-            BigButton(label: "攻 撃", color: .blue, enabled: isIdle || isFeedback) {
+            BigButton(label: "攻 撃", color: isCueActive ? .orange : .blue,
+                      enabled: isIdle || isFeedback || isCueActive) {
                 onAttackTap()
             }
             .padding(.bottom, 12)
         }
 
-        // 次へボタン（防御モードのみ）
+        // 防御モード: 次へ（開始）+ 押す（応答）
         if practiceType == .defense {
             BigButton(label: "次 へ", color: .indigo,
                       enabled: isPassiveReady || isFeedback) {
                 startNextCue()
             }
             .padding(.bottom, 12)
-        }
 
-        // 押すボタン
-        RespButton(
-            label: "押 す",
-            sub: mode == .impact ? "インパクト返し" : "コンボ継続",
-            color: .green,
-            enabled: isCueActive
-        ) { respond(.press) }
+            RespButton(
+                label: "押 す",
+                sub: "コンボ継続",
+                color: .green,
+                enabled: isCueActive
+            ) { respond(.press) }
+        }
     }
 
     // MARK: Logic
@@ -438,10 +439,13 @@ struct PracticeView: View {
         startRound()
     }
 
-    // 攻撃ボタン: idle → startup / feedback → startup（次ラウンド直接開始）
+    // 攻撃ボタン: cueActive → press（ヒット確認）/ idle・feedback → startup
     private func onAttackTap() {
-        let canStart: Bool = isIdle || isFeedback
-        guard canStart else { return }
+        if isCueActive {
+            respond(.press)
+            return
+        }
+        guard isIdle || isFeedback else { return }
         launchStartup()
     }
 
