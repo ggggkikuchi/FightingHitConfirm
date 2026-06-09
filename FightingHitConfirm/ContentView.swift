@@ -20,7 +20,6 @@ enum DrillMode: String, CaseIterable, Codable {
 }
 
 enum ResponsePractice: String, CaseIterable, Codable {
-    case both      = "両方"
     case pressOnly = "押す"
     case holdOnly  = "押さない"
 }
@@ -39,7 +38,7 @@ enum DrillPhase {
 struct DrillSettings: Codable {
     var practiceType: PracticeType = .attack
     var mode: DrillMode = .hpBar
-    var responsePractice: ResponsePractice = .both
+    var responsePractice: ResponsePractice = .pressOnly
     var confirmFrames: Int = 18
     var startupFrames: Int = 8
 
@@ -230,7 +229,7 @@ struct PracticeView: View {
 
     @State private var confirmFrames: Int = 18
     @State private var startupFrames: Int = 8
-    @State private var responsePractice: ResponsePractice = .both
+    @State private var responsePractice: ResponsePractice = .pressOnly
     @State private var phase: DrillPhase = .idle
     @State private var currentCue: CueType = .neutral
     @State private var cueStartTime = Date()
@@ -242,8 +241,7 @@ struct PracticeView: View {
     @State private var best = 0
     @State private var reactionFrames: [Double] = []
 
-    @State private var hp: Double = 0.7
-    @State private var damageFlash: Double = 0.0
+    @State private var damageFlash: Bool = false
 
     @State private var resultRecord: SessionRecord? = nil
     @State private var goHomeAfterResult = false
@@ -323,21 +321,11 @@ struct PracticeView: View {
     private var hpBar: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("HP").font(.caption2).foregroundColor(.secondary)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 5).fill(Color.gray.opacity(0.2))
-                    // ダメージ赤フラッシュ（一時的に赤く）
-                    if damageFlash > 0 {
-                        RoundedRectangle(cornerRadius: 5)
-                            .fill(Color.red)
-                            .frame(width: geo.size.width * min(hp + damageFlash, 1.0))
-                    }
-                    // 現在HP（HPバーモードのみアニメーション）
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(hp > 0.3 ? Color.green : Color.orange)
-                        .frame(width: geo.size.width * max(hp, 0))
-                        .animation(mode == .hpBar ? .easeOut(duration: 0.2) : nil, value: hp)
-                }
+            ZStack {
+                RoundedRectangle(cornerRadius: 5).fill(Color.gray.opacity(0.2))
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(damageFlash ? Color.red : Color.green)
+                    .animation(.easeOut(duration: 0.08), value: damageFlash)
             }.frame(height: 18)
         }
     }
@@ -458,7 +446,7 @@ struct PracticeView: View {
     private func resetSession() {
         generation += 1
         total = 0; successes = 0; streak = 0; best = 0
-        reactionFrames = []; hp = 0.7; damageFlash = 0
+        reactionFrames = []; damageFlash = false
         startRound()
     }
 
@@ -499,15 +487,13 @@ struct PracticeView: View {
         cueStartTime = Date()
         phase = .cueActive
 
-        // HPダメージ（ヒット時のみ）
+        // ヒット時のみ赤フラッシュ（HP は常にMAX固定）
         if currentCue == .hit {
-            let dmg = Double.random(in: 0.08...0.13)
-            damageFlash = dmg
-            hp = max(0.05, hp - dmg)
+            damageFlash = true
             let g = generation
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 guard self.generation == g else { return }
-                self.damageFlash = 0
+                self.damageFlash = false
             }
         }
 
@@ -544,33 +530,22 @@ struct PracticeView: View {
     }
 
     private func isCorrect(action: ResponseAction) -> Bool {
-        switch (mode, currentCue) {
-        case (.hpBar,   .hit),
-             (.effect,  .hit),
-             (.sound,   .hit):    return action == .press
-        case (.hpBar,   .guard_),
-             (.effect,  .guard_),
-             (.sound,   .guard_): return action == .timeout
-        case (.impact,  .impact): return action == .press
-        case (.impact,  .neutral): return action == .timeout
-        default: return false
+        switch mode {
+        case .hpBar, .effect, .sound:
+            // 押す: ヒット→press, ガード→timeout
+            // 押さない: ヒット→timeout, ガード→press（逆ロジック）
+            let hitShouldPress = (responsePractice == .pressOnly)
+            let shouldPress = (currentCue == .hit) ? hitShouldPress : !hitShouldPress
+            return action == (shouldPress ? .press : .timeout)
+        case .impact:
+            return currentCue == .impact ? action == .press : action == .timeout
         }
     }
 
     private func randomCue() -> CueType {
         switch mode {
-        case .hpBar, .effect, .sound:
-            switch responsePractice {
-            case .both:      return Bool.random() ? .hit : .guard_
-            case .pressOnly: return .hit
-            case .holdOnly:  return .guard_
-            }
-        case .impact:
-            switch responsePractice {
-            case .both:      return Bool.random() ? .impact : .neutral
-            case .pressOnly: return .impact
-            case .holdOnly:  return .neutral
-            }
+        case .hpBar, .effect, .sound: return Bool.random() ? .hit : .guard_
+        case .impact:                 return Bool.random() ? .impact : .neutral
         }
     }
 
