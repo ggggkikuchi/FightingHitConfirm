@@ -19,6 +19,12 @@ enum DrillMode: String, CaseIterable, Codable {
     }
 }
 
+enum ResponsePractice: String, CaseIterable, Codable {
+    case both      = "両方"
+    case pressOnly = "押す"
+    case holdOnly  = "押さない"
+}
+
 enum CueType { case hit, guard_, impact, neutral }
 enum ResponseAction { case press, timeout }
 
@@ -33,6 +39,7 @@ enum DrillPhase {
 struct DrillSettings: Codable {
     var practiceType: PracticeType = .attack
     var mode: DrillMode = .hpBar
+    var responsePractice: ResponsePractice = .both
     var confirmFrames: Int = 18
     var startupFrames: Int = 8
 
@@ -163,6 +170,14 @@ struct StartView: View {
                 .labelsHidden()
             }
 
+            Section("応答練習") {
+                Picker("応答練習", selection: $settings.responsePractice) {
+                    ForEach(ResponsePractice.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
             Section("判定窓") {
                 Stepper(value: $settings.confirmFrames, in: 4...60) {
                     HStack {
@@ -215,6 +230,7 @@ struct PracticeView: View {
 
     @State private var confirmFrames: Int = 18
     @State private var startupFrames: Int = 8
+    @State private var responsePractice: ResponsePractice = .both
     @State private var phase: DrillPhase = .idle
     @State private var currentCue: CueType = .neutral
     @State private var cueStartTime = Date()
@@ -274,6 +290,7 @@ struct PracticeView: View {
         .onAppear {
             confirmFrames = settings.confirmFrames
             startupFrames = settings.startupFrames
+            responsePractice = settings.responsePractice
             startRound()
         }
         .onDisappear { generation += 1 }
@@ -282,18 +299,24 @@ struct PracticeView: View {
     // MARK: Subviews
 
     private var inlineSettings: some View {
-        HStack(spacing: 8) {
-            Text(mode.rawValue)
-                .font(.caption).foregroundColor(.secondary).lineLimit(1).minimumScaleFactor(0.7)
-            Spacer()
-            Stepper(value: $confirmFrames, in: 4...60) {
-                Text("判定 \(confirmFrames)F").font(.caption).monospacedDigit()
-            }.frame(maxWidth: 160)
-            if practiceType == .attack {
-                Stepper(value: $startupFrames, in: 1...60) {
-                    Text("発生 \(startupFrames)F").font(.caption).monospacedDigit()
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text(mode.rawValue)
+                    .font(.caption).foregroundColor(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+                Spacer()
+                Stepper(value: $confirmFrames, in: 4...60) {
+                    Text("判定 \(confirmFrames)F").font(.caption).monospacedDigit()
                 }.frame(maxWidth: 160)
+                if practiceType == .attack {
+                    Stepper(value: $startupFrames, in: 1...60) {
+                        Text("発生 \(startupFrames)F").font(.caption).monospacedDigit()
+                    }.frame(maxWidth: 160)
+                }
             }
+            Picker("", selection: $responsePractice) {
+                ForEach(ResponsePractice.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
         }
     }
 
@@ -536,8 +559,18 @@ struct PracticeView: View {
 
     private func randomCue() -> CueType {
         switch mode {
-        case .hpBar, .effect, .sound: return Bool.random() ? .hit : .guard_
-        case .impact:                 return Bool.random() ? .impact : .neutral
+        case .hpBar, .effect, .sound:
+            switch responsePractice {
+            case .both:      return Bool.random() ? .hit : .guard_
+            case .pressOnly: return .hit
+            case .holdOnly:  return .guard_
+            }
+        case .impact:
+            switch responsePractice {
+            case .both:      return Bool.random() ? .impact : .neutral
+            case .pressOnly: return .impact
+            case .holdOnly:  return .neutral
+            }
         }
     }
 
