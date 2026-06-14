@@ -25,7 +25,6 @@ enum ResponsePractice: String, CaseIterable, Codable {
 }
 
 enum CueType { case hit, guard_, impact, neutral }
-enum ResponseAction { case press, timeout }
 
 enum DrillPhase {
     case idle           // 攻撃: 攻撃ボタン待ち
@@ -244,6 +243,7 @@ struct PracticeView: View {
     @State private var hp: Double = 1.0
     @State private var damageFlash: Bool = false
 
+    @State private var windowExpired = false
     @State private var barStartupF: Int = 0
     @State private var barConfirmF: Int = 0
     @State private var barCue: CueType? = nil
@@ -433,28 +433,25 @@ struct PracticeView: View {
     @ViewBuilder
     private var actionArea: some View {
         if practiceType == .attack {
-            // 攻撃: idle/cueActive → 攻撃ボタン、feedback → 準備ボタン
-            HStack(spacing: 12) {
-                BigButton(label: "攻 撃", color: isCueActive ? .orange : .blue,
-                          enabled: isIdle || isCueActive) { onAttackTap() }
-                BigButton(label: "準 備", color: .teal,
-                          enabled: isFeedback) { onReadyTap() }
-            }
+            // 常時有効の単一ボタン（フェーズで色と動作が変わる）
+            BigButton(
+                label: isCueActive ? "押 す" : isFeedback ? "次 へ" : "攻 撃",
+                color: isCueActive ? .orange : isFeedback ? .teal : .blue,
+                enabled: true
+            ) { onAttackTap() }
             .padding(.bottom, 12)
         }
 
         if practiceType == .defense {
-            // 防御: passiveReady → 次へ、feedback → 準備、cueActive → 押す
-            HStack(spacing: 12) {
-                BigButton(label: "次 へ", color: .indigo,
-                          enabled: isPassiveReady) { startNextCue() }
-                BigButton(label: "準 備", color: .teal,
-                          enabled: isFeedback) { onReadyTap() }
-            }
+            BigButton(
+                label: isFeedback ? "次 へ / 準 備" : "次 へ",
+                color: .indigo,
+                enabled: isPassiveReady || isFeedback
+            ) { startNextCue() }
             .padding(.bottom, 12)
 
             RespButton(label: "押 す", sub: "コンボ継続", color: .green,
-                       enabled: isCueActive) { respond(.press) }
+                       enabled: isCueActive) { respond() }
         }
     }
 
@@ -469,28 +466,33 @@ struct PracticeView: View {
         generation += 1
         total = 0; successes = 0; streak = 0; best = 0
         reactionFrames = []; hp = 1.0; damageFlash = false
+        windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         startRound()
     }
 
-    // 攻撃ボタン: cueActive → press（ヒット確認）/ idle → startup
+    // 攻撃ボタン（常時有効）: フェーズ別に動作切り替え
     private func onAttackTap() {
-        if isCueActive { respond(.press); return }
-        guard isIdle else { return }
-        launchStartup()
+        switch phase {
+        case .idle:
+            launchStartup()
+        case .startup:
+            launchStartup()          // 発生前でも押せる→再スタート
+        case .cueActive:
+            respond()
+        case .feedback:
+            hp = 1.0; damageFlash = false
+            launchStartup()          // 準備+攻撃を1アクションに
+        default:
+            break
+        }
     }
 
-    // 準備ボタン: feedback → HP MAX リセット → idle / passiveReady
-    private func onReadyTap() {
-        guard isFeedback else { return }
-        hp = 1.0
-        damageFlash = false
-        phase = practiceType == .attack ? .idle : .passiveReady
-    }
-
-    // 次へボタン（防御）: passiveReady → random wait → cue
+    // 次へボタン（防御）: passiveReady / feedback → random wait → cue
     private func startNextCue() {
-        guard isPassiveReady else { return }
+        guard isPassiveReady || isFeedback else { return }
+        if isFeedback { hp = 1.0; damageFlash = false }
+        windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         barConfirmF = confirmFrames
         phase = .startup
@@ -503,6 +505,7 @@ struct PracticeView: View {
     }
 
     private func launchStartup() {
+        windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         barStartupF = startupFrames; barConfirmF = confirmFrames
         phase = .startup
@@ -538,27 +541,23 @@ struct PracticeView: View {
             }
         }
 
-        // 判定窓タイムアウト（押さない = timeout）
+        // 判定窓経過 → フラグのみ（自動判定しない、ユーザーが押したタイミングで判定）
         let g = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + confirmSec) {
             guard self.generation == g, case .cueActive = self.phase else { return }
-            self.respond(.timeout)
+            self.windowExpired = true
         }
     }
 
-    private func respond(_ action: ResponseAction) {
+    private func respond() {
         guard case .cueActive = phase else { return }
 
-        var pressF: Double? = nil
-        if action == .press {
-            let ms = Date().timeIntervalSince(cueStartTime) * 1000
-            pressF = ms * 60.0 / 1000.0
-        }
-
-        let ok = isCorrect(action: action)
+        let pressF = Date().timeIntervalSince(cueStartTime) * 60.0
+        let ok = isCorrect()
         total += 1
         if ok { successes += 1; streak += 1; best = max(best, streak) } else { streak = 0 }
-        if let f = pressF, ok { reactionFrames.append(f) }  // 正解プレスのみ統計に加算
+        // 窓内の正解プレスのみ統計に加算（遅延正解は含めない）
+        if !windowExpired && ok { reactionFrames.append(pressF) }
 
         barCue = currentCue
         barReactionF = pressF
@@ -566,17 +565,18 @@ struct PracticeView: View {
         phase = .feedback(ok)
     }
 
-    private func isCorrect(action: ResponseAction) -> Bool {
+    private func isCorrect() -> Bool {
+        let shouldPressInWindow: Bool
         switch mode {
         case .hpBar, .effect, .sound:
-            // 押す: ヒット→press, ガード→timeout
-            // 押さない: ヒット→timeout, ガード→press（逆ロジック）
-            let hitShouldPress = (responsePractice == .pressOnly)
-            let shouldPress = (currentCue == .hit) ? hitShouldPress : !hitShouldPress
-            return action == (shouldPress ? .press : .timeout)
+            let isHit = (currentCue == .hit)
+            shouldPressInWindow = responsePractice == .pressOnly ? isHit : !isHit
         case .impact:
-            return currentCue == .impact ? action == .press : action == .timeout
+            shouldPressInWindow = (currentCue == .impact)
         }
+        // 窓内プレス: shouldPress と一致→成功
+        // 窓外プレス: shouldNotPress と一致→成功（正しく待てた）
+        return windowExpired ? !shouldPressInWindow : shouldPressInWindow
     }
 
     private func randomCue() -> CueType {
@@ -755,15 +755,27 @@ struct FrameBar: View {
                     let cueLabel = c == .hit ? "HIT" : c == .guard_ ? "GRD" : c == .impact ? "IMP" : "NEU"
                     tag(cueLabel, cueColor)
 
+                    // 判定窓内のボックス
                     ForEach(0..<max(confirmF, 0), id: \.self) { i in
                         let f = Double(i) + 0.5
-                        if let rf = reactionF {
-                            box(f <= rf
-                                ? (correct == true ? Color.green : Color.red)
-                                : Color(.systemGray5))
+                        if let rf = reactionF, rf <= Double(confirmF) {
+                            // 窓内プレス
+                            box(f <= rf ? (correct == true ? Color.green : Color.red) : Color(.systemGray5))
                         } else {
-                            // timeout
-                            box(correct == true ? Color(.systemGray5) : Color.red.opacity(0.3))
+                            // 遅延プレス or 未実行：窓内は空
+                            box(Color(.systemGray5))
+                        }
+                    }
+
+                    // 窓外の遅延フレーム（reactionF > confirmF の場合）
+                    if let rf = reactionF, rf > Double(confirmF) {
+                        Rectangle().fill(Color(.systemGray2)).frame(width: 2, height: bh)  // 窓境界線
+                        let lateCount = Int(ceil(rf - Double(confirmF))) + 1
+                        ForEach(0..<lateCount, id: \.self) { j in
+                            let f = Double(confirmF) + Double(j) + 0.5
+                            box(f <= rf
+                                ? (correct == true ? Color.green.opacity(0.65) : Color.red.opacity(0.65))
+                                : Color(.systemGray6))
                         }
                     }
                 } else {
