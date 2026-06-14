@@ -241,7 +241,14 @@ struct PracticeView: View {
     @State private var best = 0
     @State private var reactionFrames: [Double] = []
 
+    @State private var hp: Double = 1.0
     @State private var damageFlash: Bool = false
+
+    @State private var barStartupF: Int = 0
+    @State private var barConfirmF: Int = 0
+    @State private var barCue: CueType? = nil
+    @State private var barReactionF: Double? = nil
+    @State private var barCorrect: Bool? = nil
 
     @State private var resultRecord: SessionRecord? = nil
     @State private var goHomeAfterResult = false
@@ -263,7 +270,8 @@ struct PracticeView: View {
         VStack(spacing: 0) {
             inlineSettings.padding(.horizontal).padding(.top, 8)
             hpBar.padding(.horizontal).padding(.top, 12)
-            cueArea.padding(.horizontal).padding(.top, 12)
+            frameBar.padding(.horizontal).padding(.top, 8)
+            cueArea.padding(.horizontal).padding(.top, 8)
             statsBar.padding(.horizontal).padding(.top, 12)
             Spacer()
             actionArea.padding(.horizontal).padding(.bottom, 32)
@@ -289,6 +297,8 @@ struct PracticeView: View {
             confirmFrames = settings.confirmFrames
             startupFrames = settings.startupFrames
             responsePractice = settings.responsePractice
+            barConfirmF = settings.confirmFrames
+            barStartupF = settings.startupFrames
             startRound()
         }
         .onDisappear { generation += 1 }
@@ -321,13 +331,26 @@ struct PracticeView: View {
     private var hpBar: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("HP").font(.caption2).foregroundColor(.secondary)
-            ZStack {
-                RoundedRectangle(cornerRadius: 5).fill(Color.gray.opacity(0.2))
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(damageFlash ? Color.red : Color.green)
-                    .animation(.easeOut(duration: 0.08), value: damageFlash)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 5).fill(Color.gray.opacity(0.2))
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(damageFlash ? Color.red : (hp > 0.3 ? Color.green : Color.orange))
+                        .frame(width: geo.size.width * hp)
+                        .animation(.easeOut(duration: 0.15), value: hp)
+                }
             }.frame(height: 18)
         }
+    }
+
+    private var frameBar: some View {
+        FrameBar(
+            startupF: practiceType == .attack ? startupFrames : 0,
+            confirmF: confirmFrames,
+            cue: barCue,
+            reactionF: barReactionF,
+            correct: barCorrect
+        )
     }
 
     private var cueArea: some View {
@@ -409,30 +432,29 @@ struct PracticeView: View {
 
     @ViewBuilder
     private var actionArea: some View {
-        // 攻撃ボタン（攻撃モードのみ）
-        // idle/feedback → ラウンド開始、cueActive → ヒット確認（押す）
         if practiceType == .attack {
-            BigButton(label: "攻 撃", color: isCueActive ? .orange : .blue,
-                      enabled: isIdle || isFeedback || isCueActive) {
-                onAttackTap()
+            // 攻撃: idle/cueActive → 攻撃ボタン、feedback → 準備ボタン
+            HStack(spacing: 12) {
+                BigButton(label: "攻 撃", color: isCueActive ? .orange : .blue,
+                          enabled: isIdle || isCueActive) { onAttackTap() }
+                BigButton(label: "準 備", color: .teal,
+                          enabled: isFeedback) { onReadyTap() }
             }
             .padding(.bottom, 12)
         }
 
-        // 防御モード: 次へ（開始）+ 押す（応答）
         if practiceType == .defense {
-            BigButton(label: "次 へ", color: .indigo,
-                      enabled: isPassiveReady || isFeedback) {
-                startNextCue()
+            // 防御: passiveReady → 次へ、feedback → 準備、cueActive → 押す
+            HStack(spacing: 12) {
+                BigButton(label: "次 へ", color: .indigo,
+                          enabled: isPassiveReady) { startNextCue() }
+                BigButton(label: "準 備", color: .teal,
+                          enabled: isFeedback) { onReadyTap() }
             }
             .padding(.bottom, 12)
 
-            RespButton(
-                label: "押 す",
-                sub: "コンボ継続",
-                color: .green,
-                enabled: isCueActive
-            ) { respond(.press) }
+            RespButton(label: "押 す", sub: "コンボ継続", color: .green,
+                       enabled: isCueActive) { respond(.press) }
         }
     }
 
@@ -446,24 +468,31 @@ struct PracticeView: View {
     private func resetSession() {
         generation += 1
         total = 0; successes = 0; streak = 0; best = 0
-        reactionFrames = []; damageFlash = false
+        reactionFrames = []; hp = 1.0; damageFlash = false
+        barCue = nil; barReactionF = nil; barCorrect = nil
         startRound()
     }
 
-    // 攻撃ボタン: cueActive → press（ヒット確認）/ idle・feedback → startup
+    // 攻撃ボタン: cueActive → press（ヒット確認）/ idle → startup
     private func onAttackTap() {
-        if isCueActive {
-            respond(.press)
-            return
-        }
-        guard isIdle || isFeedback else { return }
+        if isCueActive { respond(.press); return }
+        guard isIdle else { return }
         launchStartup()
     }
 
-    // 次へボタン（防御）: passiveReady / feedback → random wait → cue
+    // 準備ボタン: feedback → HP MAX リセット → idle / passiveReady
+    private func onReadyTap() {
+        guard isFeedback else { return }
+        hp = 1.0
+        damageFlash = false
+        phase = practiceType == .attack ? .idle : .passiveReady
+    }
+
+    // 次へボタン（防御）: passiveReady → random wait → cue
     private func startNextCue() {
-        let canStart: Bool = isPassiveReady || isFeedback
-        guard canStart else { return }
+        guard isPassiveReady else { return }
+        barCue = nil; barReactionF = nil; barCorrect = nil
+        barConfirmF = confirmFrames
         phase = .startup
         let g = generation
         let delay = Double.random(in: 0.5...2.0)
@@ -474,6 +503,8 @@ struct PracticeView: View {
     }
 
     private func launchStartup() {
+        barCue = nil; barReactionF = nil; barCorrect = nil
+        barStartupF = startupFrames; barConfirmF = confirmFrames
         phase = .startup
         let g = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + startupSec) {
@@ -487,9 +518,10 @@ struct PracticeView: View {
         cueStartTime = Date()
         phase = .cueActive
 
-        // ヒット時のみ赤フラッシュ（HP は常にMAX固定）
+        // ヒット時: 約1/10 HP減算 + 赤フラッシュ
         if currentCue == .hit {
             damageFlash = true
+            hp = max(0.05, hp - 0.1)
             let g = generation
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 guard self.generation == g else { return }
@@ -517,16 +549,21 @@ struct PracticeView: View {
     private func respond(_ action: ResponseAction) {
         guard case .cueActive = phase else { return }
 
+        var pressF: Double? = nil
         if action == .press {
             let ms = Date().timeIntervalSince(cueStartTime) * 1000
-            reactionFrames.append(ms * 60.0 / 1000.0)
+            pressF = ms * 60.0 / 1000.0
         }
 
         let ok = isCorrect(action: action)
         total += 1
         if ok { successes += 1; streak += 1; best = max(best, streak) } else { streak = 0 }
+        if let f = pressF, ok { reactionFrames.append(f) }  // 正解プレスのみ統計に加算
+
+        barCue = currentCue
+        barReactionF = pressF
+        barCorrect = ok
         phase = .feedback(ok)
-        // 自動進行なし: 攻撃ボタン or 次へボタンで手動進行
     }
 
     private func isCorrect(action: ResponseAction) -> Bool {
@@ -687,5 +724,71 @@ struct MiniStat: View {
         }
         .frame(maxWidth: .infinity).padding(.vertical, 8)
         .background(color.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Frame Bar
+
+struct FrameBar: View {
+    let startupF: Int
+    let confirmF: Int
+    let cue: CueType?
+    let reactionF: Double?
+    let correct: Bool?
+
+    private let bw: CGFloat = 9
+    private let bh: CGFloat = 20
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 1) {
+                tag("攻", .blue)
+
+                // Startup frames
+                ForEach(0..<max(startupF, 0), id: \.self) { _ in
+                    box(cue != nil ? Color(.systemGray3) : Color(.systemGray5))
+                }
+
+                // Cue label + confirmation window
+                if let c = cue {
+                    let cueColor: Color = (c == .hit || c == .impact) ? .orange : Color(.systemGray)
+                    let cueLabel = c == .hit ? "HIT" : c == .guard_ ? "GRD" : c == .impact ? "IMP" : "NEU"
+                    tag(cueLabel, cueColor)
+
+                    ForEach(0..<max(confirmF, 0), id: \.self) { i in
+                        let f = Double(i) + 0.5
+                        if let rf = reactionF {
+                            box(f <= rf
+                                ? (correct == true ? Color.green : Color.red)
+                                : Color(.systemGray5))
+                        } else {
+                            // timeout
+                            box(correct == true ? Color(.systemGray5) : Color.red.opacity(0.3))
+                        }
+                    }
+                } else {
+                    // 未実行：ヒント表示
+                    tag("?", Color(.systemGray))
+                    ForEach(0..<max(confirmF, 0), id: \.self) { _ in
+                        box(Color(.systemGray6))
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(height: bh + 4)
+        .background(Color(.systemGray6).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func box(_ color: Color) -> some View {
+        RoundedRectangle(cornerRadius: 2).fill(color).frame(width: bw, height: bh)
+    }
+
+    private func tag(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 8, weight: .bold))
+            .padding(.horizontal, 3).padding(.vertical, 2)
+            .background(color).foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 2))
     }
 }
