@@ -433,12 +433,13 @@ struct PracticeView: View {
     @ViewBuilder
     private var actionArea: some View {
         if practiceType == .attack {
-            // 常時有効の単一ボタン（フェーズで色と動作が変わる）
-            BigButton(
-                label: isCueActive ? "押 す" : isFeedback ? "次 へ" : "攻 撃",
-                color: isCueActive ? .orange : isFeedback ? .teal : .blue,
-                enabled: true
-            ) { onAttackTap() }
+            // 常時有効の単一ボタン（フェーズ×windowExpiredで色・ラベルが変わる）
+            // idle/startup: [攻撃]青　cueActive窓内: [攻撃]橙　窓切れ/feedback: [次へ]
+            let showNext = isFeedback || (isCueActive && windowExpired)
+            let btnColor: Color = showNext ? .teal : (isCueActive && !windowExpired) ? .orange : .blue
+            BigButton(label: showNext ? "次 へ" : "攻 撃", color: btnColor, enabled: true) {
+                onAttackTap()
+            }
             .padding(.bottom, 12)
         }
 
@@ -482,7 +483,7 @@ struct PracticeView: View {
             respond()
         case .feedback:
             hp = 1.0; damageFlash = false
-            launchStartup()          // 準備+攻撃を1アクションに
+            phase = .idle            // HPリセットしてidle（次の攻撃押しまで待機）
         default:
             break
         }
