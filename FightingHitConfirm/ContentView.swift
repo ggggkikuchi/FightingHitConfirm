@@ -241,8 +241,8 @@ struct PracticeView: View {
     @State private var reactionFrames: [Double] = []
 
     @State private var hp: Double = 1.0
-    @State private var damageFlash: Bool = false
 
+    @State private var attackPressedAt: Date? = nil
     @State private var windowExpired = false
     @State private var barStartupF: Int = 0
     @State private var barConfirmF: Int = 0
@@ -334,23 +334,37 @@ struct PracticeView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 5).fill(Color.gray.opacity(0.2))
+                    // Lost HP shown as red instantly
+                    RoundedRectangle(cornerRadius: 5).fill(Color.red.opacity(0.55))
+                        .frame(width: geo.size.width)
+                    // Current HP overlaid in green/orange
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(damageFlash ? Color.red : (hp > 0.3 ? Color.green : Color.orange))
+                        .fill(hp > 0.3 ? Color.green : Color.orange)
                         .frame(width: geo.size.width * hp)
-                        .animation(.easeOut(duration: 0.15), value: hp)
                 }
             }.frame(height: 18)
         }
     }
 
     private var frameBar: some View {
-        FrameBar(
-            startupF: practiceType == .attack ? startupFrames : 0,
-            confirmF: confirmFrames,
-            cue: barCue,
-            reactionF: barReactionF,
-            correct: barCorrect
-        )
+        TimelineView(.animation) { tl in
+            let liveF: Double? = attackPressedAt.map { tl.date.timeIntervalSince($0) * 60.0 }
+            FrameBar(
+                startupF: practiceType == .attack ? startupFrames : 0,
+                confirmF: confirmFrames,
+                cue: barCue,
+                reactionF: barReactionF,
+                correct: barCorrect,
+                liveF: liveF,
+                liveCue: isCueActive ? currentCue : nil
+            )
+        }
+    }
+
+    private var feedbackDetail: String? {
+        guard let ok = feedbackOk, !ok, let rf = barReactionF else { return nil }
+        let f = Int(min(rf, 99.0))
+        return windowExpired ? "遅すぎ: \(f)F（窓 \(confirmFrames)F）" : "早押し: \(f)F"
     }
 
     private var cueArea: some View {
@@ -358,8 +372,13 @@ struct PracticeView: View {
         let useAnimation = (mode == .hpBar || mode == .sound)
         return ZStack {
             RoundedRectangle(cornerRadius: 14).fill(bg)
-            if !label.isEmpty {
-                Text(label).font(.system(size: 52, weight: .black)).foregroundColor(fg)
+            VStack(spacing: 4) {
+                if !label.isEmpty {
+                    Text(label).font(.system(size: 52, weight: .black)).foregroundColor(fg)
+                }
+                if let detail = feedbackDetail {
+                    Text(detail).font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundColor(fg)
+                }
             }
         }
         .frame(maxWidth: .infinity, minHeight: 130)
@@ -466,8 +485,8 @@ struct PracticeView: View {
     private func resetSession() {
         generation += 1
         total = 0; successes = 0; streak = 0; best = 0
-        reactionFrames = []; hp = 1.0; damageFlash = false
-        windowExpired = false
+        reactionFrames = []; hp = 1.0
+        attackPressedAt = nil; windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         startRound()
     }
@@ -482,7 +501,7 @@ struct PracticeView: View {
         case .cueActive:
             respond()
         case .feedback:
-            hp = 1.0; damageFlash = false
+            hp = 1.0; attackPressedAt = nil
             phase = .idle            // HPリセットしてidle（次の攻撃押しまで待機）
         default:
             break
@@ -492,7 +511,7 @@ struct PracticeView: View {
     // 次へボタン（防御）: passiveReady / feedback → random wait → cue
     private func startNextCue() {
         guard isPassiveReady || isFeedback else { return }
-        if isFeedback { hp = 1.0; damageFlash = false }
+        if isFeedback { hp = 1.0 }
         windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         barConfirmF = confirmFrames
@@ -507,6 +526,7 @@ struct PracticeView: View {
 
     private func launchStartup() {
         windowExpired = false
+        attackPressedAt = Date()
         barCue = nil; barReactionF = nil; barCorrect = nil
         barStartupF = startupFrames; barConfirmF = confirmFrames
         phase = .startup
@@ -522,15 +542,9 @@ struct PracticeView: View {
         cueStartTime = Date()
         phase = .cueActive
 
-        // ヒット時: 約1/10 HP減算 + 赤フラッシュ
+        // ヒット時: 約1/10 HP減算（即座に赤セクション表示）
         if currentCue == .hit {
-            damageFlash = true
             hp = max(0.05, hp - 0.1)
-            let g = generation
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                guard self.generation == g else { return }
-                self.damageFlash = false
-            }
         }
 
         // 音モード: サウンド再生
@@ -560,6 +574,7 @@ struct PracticeView: View {
         // 窓内の正解プレスのみ統計に加算（遅延正解は含めない）
         if !windowExpired && ok { reactionFrames.append(pressF) }
 
+        attackPressedAt = nil
         barCue = currentCue
         barReactionF = pressF
         barCorrect = ok
@@ -736,6 +751,8 @@ struct FrameBar: View {
     let cue: CueType?
     let reactionF: Double?
     let correct: Bool?
+    let liveF: Double?      // nil = result mode; non-nil = live progress
+    let liveCue: CueType?   // current cue during .cueActive (live mode only)
 
     private let bw: CGFloat = 9
     private let bh: CGFloat = 20
@@ -743,58 +760,66 @@ struct FrameBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 1) {
-                tag("攻", .blue)
-
-                // Startup frames
-                ForEach(0..<max(startupF, 0), id: \.self) { _ in
-                    box(cue != nil ? Color(.systemGray3) : Color(.systemGray5))
-                }
-
-                // Cue label + confirmation window
-                if let c = cue {
-                    let cueColor: Color = (c == .hit || c == .impact) ? .orange : Color(.systemGray)
-                    let cueLabel = c == .hit ? "HIT" : c == .guard_ ? "GRD" : c == .impact ? "IMP" : "NEU"
-                    tag(cueLabel, cueColor)
-
-                    // 判定窓内のボックス
-                    ForEach(0..<max(confirmF, 0), id: \.self) { i in
-                        let f = Double(i) + 0.5
-                        if let rf = reactionF, rf <= Double(confirmF) {
-                            // 窓内プレス
-                            box(f <= rf ? (correct == true ? Color.green : Color.red) : Color(.systemGray5))
-                        } else {
-                            // 遅延プレス or 未実行：窓内は空
-                            box(Color(.systemGray5))
-                        }
+                if let lf = liveF {
+                    // --- Live mode: 1F per tick animation ---
+                    tag("攻", .blue)
+                    let filledS = min(lf, Double(startupF))
+                    ForEach(0..<max(startupF, 0), id: \.self) { i in
+                        box(Double(i) < filledS ? Color(.systemGray3) : Color(.systemGray5))
                     }
-
-                    // 窓外の遅延フレーム（reactionF > confirmF の場合、最大99F表示）
-                    if let rf = reactionF, rf > Double(confirmF) {
-                        Rectangle().fill(Color(.systemGray2)).frame(width: 2, height: bh)  // 窓境界線
-                        let cappedRF = min(rf, 99.0)
-                        let lateCount = Int(ceil(cappedRF - Double(confirmF))) + 1
-                        ForEach(0..<lateCount, id: \.self) { j in
-                            let f = Double(confirmF) + Double(j) + 0.5
-                            box(f <= cappedRF
-                                ? (correct == true ? Color.green.opacity(0.65) : Color.red.opacity(0.65))
-                                : Color(.systemGray6))
+                    if lf >= Double(startupF), let lc = liveCue {
+                        let cueColor: Color = (lc == .hit || lc == .impact) ? .orange : Color(.systemGray)
+                        let cueLabel = lc == .hit ? "HIT" : lc == .guard_ ? "GRD" : lc == .impact ? "IMP" : "NEU"
+                        tag(cueLabel, cueColor)
+                        let filledC = min(lf - Double(startupF), Double(confirmF))
+                        ForEach(0..<max(confirmF, 0), id: \.self) { j in
+                            box(Double(j) < filledC ? Color(.systemGray3) : Color(.systemGray6))
                         }
-                    }
-
-                    // 反応フレーム数テキスト
-                    if let rf = reactionF {
-                        let displayF = Int(min(rf, 99.0))
-                        let labelColor: Color = correct == true ? .green : .red
-                        Text("\(displayF)F")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundColor(labelColor)
-                            .padding(.leading, 4)
                     }
                 } else {
-                    // 未実行：ヒント表示
-                    tag("?", Color(.systemGray))
-                    ForEach(0..<max(confirmF, 0), id: \.self) { _ in
-                        box(Color(.systemGray6))
+                    // --- Result mode ---
+                    tag("攻", .blue)
+                    ForEach(0..<max(startupF, 0), id: \.self) { _ in
+                        box(cue != nil ? Color(.systemGray3) : Color(.systemGray5))
+                    }
+                    if let c = cue {
+                        let cueColor: Color = (c == .hit || c == .impact) ? .orange : Color(.systemGray)
+                        let cueLabel = c == .hit ? "HIT" : c == .guard_ ? "GRD" : c == .impact ? "IMP" : "NEU"
+                        tag(cueLabel, cueColor)
+
+                        ForEach(0..<max(confirmF, 0), id: \.self) { i in
+                            let f = Double(i) + 0.5
+                            if let rf = reactionF, rf <= Double(confirmF) {
+                                box(f <= rf ? (correct == true ? Color.green : Color.red) : Color(.systemGray5))
+                            } else {
+                                box(Color(.systemGray5))
+                            }
+                        }
+
+                        if let rf = reactionF, rf > Double(confirmF) {
+                            Rectangle().fill(Color(.systemGray2)).frame(width: 2, height: bh)
+                            let cappedRF = min(rf, 99.0)
+                            let lateCount = Int(ceil(cappedRF - Double(confirmF))) + 1
+                            ForEach(0..<lateCount, id: \.self) { j in
+                                let f = Double(confirmF) + Double(j) + 0.5
+                                box(f <= cappedRF
+                                    ? (correct == true ? Color.green.opacity(0.65) : Color.red.opacity(0.65))
+                                    : Color(.systemGray6))
+                            }
+                        }
+
+                        if let rf = reactionF {
+                            let displayF = Int(min(rf, 99.0))
+                            Text("\(displayF)F")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(correct == true ? .green : .red)
+                                .padding(.leading, 4)
+                        }
+                    } else {
+                        tag("?", Color(.systemGray))
+                        ForEach(0..<max(confirmF, 0), id: \.self) { _ in
+                            box(Color(.systemGray6))
+                        }
                     }
                 }
             }
