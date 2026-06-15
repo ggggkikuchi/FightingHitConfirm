@@ -768,16 +768,27 @@ struct FrameBar: View {
                         }
                     }
 
-                    // 窓外の遅延フレーム（reactionF > confirmF の場合）
+                    // 窓外の遅延フレーム（reactionF > confirmF の場合、最大99F表示）
                     if let rf = reactionF, rf > Double(confirmF) {
                         Rectangle().fill(Color(.systemGray2)).frame(width: 2, height: bh)  // 窓境界線
-                        let lateCount = Int(ceil(rf - Double(confirmF))) + 1
+                        let cappedRF = min(rf, 99.0)
+                        let lateCount = Int(ceil(cappedRF - Double(confirmF))) + 1
                         ForEach(0..<lateCount, id: \.self) { j in
                             let f = Double(confirmF) + Double(j) + 0.5
-                            box(f <= rf
+                            box(f <= cappedRF
                                 ? (correct == true ? Color.green.opacity(0.65) : Color.red.opacity(0.65))
                                 : Color(.systemGray6))
                         }
+                    }
+
+                    // 反応フレーム数テキスト
+                    if let rf = reactionF {
+                        let displayF = Int(min(rf, 99.0))
+                        let labelColor: Color = correct == true ? .green : .red
+                        Text("\(displayF)F")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(labelColor)
+                            .padding(.leading, 4)
                     }
                 } else {
                     // 未実行：ヒント表示
