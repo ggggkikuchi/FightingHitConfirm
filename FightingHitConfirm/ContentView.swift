@@ -40,6 +40,8 @@ struct DrillSettings: Codable {
     var responsePractice: ResponsePractice = .pressOnly
     var confirmFrames: Int = 18
     var startupFrames: Int = 8
+    var hpDamage: Double = 0.1
+    var hpStart: Double = 1.0
 
     var confirmSeconds: Double { Double(confirmFrames) / 60.0 }
     var startupSeconds: Double { Double(startupFrames) / 60.0 }
@@ -198,6 +200,23 @@ struct StartView: View {
                 }
             }
 
+            Section("HP設定") {
+                Stepper(value: $settings.hpDamage, in: 0.05...0.5, step: 0.05) {
+                    HStack {
+                        Text("ダメージ").foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(Int(settings.hpDamage * 100))%").monospacedDigit().bold()
+                    }
+                }
+                Stepper(value: $settings.hpStart, in: 0.1...1.0, step: 0.1) {
+                    HStack {
+                        Text("開始HP").foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(Int(settings.hpStart * 100))%").monospacedDigit().bold()
+                    }
+                }
+            }
+
             Section {
                 Button {
                     settings.save(); toPractice = true
@@ -241,6 +260,8 @@ struct PracticeView: View {
     @State private var reactionFrames: [Double] = []
 
     @State private var hp: Double = 1.0
+    @State private var hpDamage: Double = 0.1
+    @State private var hpStart: Double = 1.0
 
     @State private var attackPressedAt: Date? = nil
     @State private var windowExpired = false
@@ -297,6 +318,9 @@ struct PracticeView: View {
             confirmFrames = settings.confirmFrames
             startupFrames = settings.startupFrames
             responsePractice = settings.responsePractice
+            hpDamage = settings.hpDamage
+            hpStart = settings.hpStart
+            hp = settings.hpStart
             barConfirmF = settings.confirmFrames
             barStartupF = settings.startupFrames
             startRound()
@@ -367,6 +391,17 @@ struct PracticeView: View {
         return windowExpired ? "遅すぎ: \(f)F（窓 \(confirmFrames)F）" : "早押し: \(f)F"
     }
 
+    private var wouldSucceedOnTimeout: Bool {
+        switch mode {
+        case .hpBar, .effect, .sound:
+            let isHit = (currentCue == .hit)
+            let shouldPress = responsePractice == .pressOnly ? isHit : !isHit
+            return !shouldPress
+        case .impact:
+            return !(currentCue == .impact)
+        }
+    }
+
     private var cueArea: some View {
         let (label, bg, fg) = cueVisuals()
         let useAnimation = (mode == .hpBar || mode == .sound)
@@ -406,6 +441,10 @@ struct PracticeView: View {
 
         // cueActive状態
         if isCueActive {
+            // 押さない正解: 窓が切れた瞬間に成功表示
+            if windowExpired && wouldSucceedOnTimeout {
+                return ("成功!", Color.green.opacity(0.2), .green)
+            }
             switch mode {
             case .hpBar:
                 // HPバーが主cue。エリアは薄いフラッシュのみ
@@ -440,12 +479,12 @@ struct PracticeView: View {
 
     private var statsBar: some View {
         let rate = total > 0 ? Int(Double(successes) / Double(total) * 100) : 0
-        let avgF = reactionFrames.isEmpty ? 0.0 : reactionFrames.reduce(0, +) / Double(reactionFrames.count)
+        let lastF = barReactionF.map { String(format: "%.0fF", min($0, 99.0)) } ?? "---"
         return HStack(spacing: 0) {
-            MiniStat(title: "成功率", value: "\(rate)%",                      color: .green)
-            MiniStat(title: "反応",   value: String(format: "%.1fF", avgF),   color: .blue)
-            MiniStat(title: "連続",   value: "\(streak)",                     color: .orange)
-            MiniStat(title: "最高",   value: "\(best)",                       color: .purple)
+            MiniStat(title: "成功率", value: "\(rate)%", color: .green)
+            MiniStat(title: "反応",   value: lastF,      color: .blue)
+            MiniStat(title: "連続",   value: "\(streak)", color: .orange)
+            MiniStat(title: "最高",   value: "\(best)",   color: .purple)
         }
     }
 
@@ -485,7 +524,7 @@ struct PracticeView: View {
     private func resetSession() {
         generation += 1
         total = 0; successes = 0; streak = 0; best = 0
-        reactionFrames = []; hp = 1.0
+        reactionFrames = []; hp = hpStart
         attackPressedAt = nil; windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         startRound()
@@ -501,7 +540,7 @@ struct PracticeView: View {
         case .cueActive:
             respond()
         case .feedback:
-            hp = 1.0; attackPressedAt = nil
+            hp = hpStart; attackPressedAt = nil
             phase = .idle            // HPリセットしてidle（次の攻撃押しまで待機）
         default:
             break
@@ -511,7 +550,7 @@ struct PracticeView: View {
     // 次へボタン（防御）: passiveReady / feedback → random wait → cue
     private func startNextCue() {
         guard isPassiveReady || isFeedback else { return }
-        if isFeedback { hp = 1.0 }
+        if isFeedback { hp = hpStart }
         windowExpired = false
         barCue = nil; barReactionF = nil; barCorrect = nil
         barConfirmF = confirmFrames
@@ -542,9 +581,9 @@ struct PracticeView: View {
         cueStartTime = Date()
         phase = .cueActive
 
-        // ヒット時: 約1/10 HP減算（即座に赤セクション表示）
+        // ヒット時: HP減算（即座に赤セクション表示）
         if currentCue == .hit {
-            hp = max(0.05, hp - 0.1)
+            hp = max(0.05, hp - hpDamage)
         }
 
         // 音モード: サウンド再生
@@ -761,10 +800,11 @@ struct FrameBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 1) {
                 if let lf = liveF {
-                    // --- Live mode: 1F per tick animation ---
+                    // --- Live mode: 1F per tick animation (攻=0F, boxes=frames 1..startupF-1, HIT=startupF) ---
                     tag("攻", .blue)
-                    let filledS = min(lf, Double(startupF))
-                    ForEach(0..<max(startupF, 0), id: \.self) { i in
+                    let preHit = max(startupF - 1, 0)
+                    let filledS = min(lf, Double(preHit))
+                    ForEach(0..<preHit, id: \.self) { i in
                         box(Double(i) < filledS ? Color(.systemGray3) : Color(.systemGray5))
                     }
                     if lf >= Double(startupF), let lc = liveCue {
@@ -777,9 +817,9 @@ struct FrameBar: View {
                         }
                     }
                 } else {
-                    // --- Result mode ---
+                    // --- Result mode (攻=0F, boxes=frames 1..startupF-1, HIT=startupF) ---
                     tag("攻", .blue)
-                    ForEach(0..<max(startupF, 0), id: \.self) { _ in
+                    ForEach(0..<max(startupF - 1, 0), id: \.self) { _ in
                         box(cue != nil ? Color(.systemGray3) : Color(.systemGray5))
                     }
                     if let c = cue {
